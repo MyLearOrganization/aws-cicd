@@ -1,0 +1,86 @@
+
+name: Reusable Terraform Plan
+
+on:
+  workflow_call:
+    inputs:
+      aws_role_arn:
+        description: AWS IAM role ARN used for Terraform planning
+        required: true
+        type: string
+      plan_artifact_name:
+        description: Name of the uploaded Terraform plan artifact
+        required: true
+        type: string
+      role_session_name:
+        description: AWS role session name
+        required: true
+        type: string
+      tf_working_dir:
+        description: Terraform working directory
+        required: false
+        type: string
+        default: terraform
+      tf_version:
+        description: Terraform version
+        required: false
+        type: string
+        default: "1.11.0"
+      aws_region:
+        description: AWS region
+        required: false
+        type: string
+        default: eu-central-1
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  terraform_plan:
+    name: Terraform Plan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.tf_version }}
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ inputs.aws_role_arn }}
+          aws-region: ${{ inputs.aws_region }}
+          role-session-name: ${{ inputs.role_session_name }}
+
+      - name: Verify AWS Identity
+        run: aws sts get-caller-identity
+
+      - name: Terraform Initialize
+        working-directory: ${{ inputs.tf_working_dir }}
+        run: terraform init -input=false -lockfile=readonly
+
+      - name: Terraform Plan
+        working-directory: ${{ inputs.tf_working_dir }}
+        run: |
+          terraform plan \
+            -input=false \
+            -no-color \
+            -lock-timeout=5m \
+            -out=tfplan.binary
+
+          terraform show -json tfplan.binary > tfplan.json
+
+      - name: Upload Terraform Plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.plan_artifact_name }}
+          path: |
+            ${{ inputs.tf_working_dir }}/tfplan.binary
+            ${{ inputs.tf_working_dir }}/tfplan.json
+          retention-days: 3
+          if-no-files-found: error
