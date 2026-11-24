@@ -1,15 +1,15 @@
 
-name: Terraform AWS Deployment
+name: Terraform AWS CI/CD
 
 on:
-  pull_request:
-    branches:
+  push:
+    branches-ignore:
       - main
     paths:
       - 'terraform/**'
       - '.github/workflows/terraform-aws.yml'
 
-  push:
+  pull_request:
     branches:
       - main
     paths:
@@ -20,7 +20,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: terraform-production
+  group: terraform-${{ github.ref }}
   cancel-in-progress: false
 
 env:
@@ -33,10 +33,16 @@ env:
 jobs:
 
   # ==========================================
-  # STAGE 1: CODE QUALITY AND SECURITY
+  # STAGE 1: TERRAFORM VALIDATION
+  # Runs on feature branches, PRs and main
   # ==========================================
 
   validate:
+    if: >-
+      (github.event_name == 'push' &&
+      github.ref != 'refs/heads/main') ||
+      github.event_name == 'pull_request'
+
     name: Terraform Validation
     runs-on: ubuntu-latest
 
@@ -55,7 +61,7 @@ jobs:
 
       - name: Terraform Initialize
         working-directory: ${{ env.TF_WORKING_DIR }}
-        run: terraform init -backend=false -input=false
+        run: terraform init -backend=false -input=false -lockfile=readonly
 
       - name: Terraform Validate
         working-directory: ${{ env.TF_WORKING_DIR }}
@@ -72,24 +78,23 @@ jobs:
         working-directory: ${{ env.TF_WORKING_DIR }}
         run: tflint --recursive
 
-      - name: Install Checkov
-        run: pip install checkov
-
-      - name: Terraform Security Scan
-        working-directory: ${{ env.TF_WORKING_DIR }}
-        run: checkov -d . --framework terraform
-
   # ==========================================
-  # STAGE 2: TERRAFORM PLAN
-  # Only runs after merge/push to main
+  # STAGE 2: TERRAFORM PLAN ON FEATURE BRANCHES
+  # AND PULL REQUESTS
   # ==========================================
 
-  plan:
+  feature_plan:
     name: Terraform Plan
     runs-on: ubuntu-latest
-    needs: validate
 
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs:
+      - validate
+
+    if: >-
+      (github.event_name == 'push' &&
+       github.ref != 'refs/heads/main') ||
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository)
 
     permissions:
       contents: read
@@ -109,34 +114,79 @@ jobs:
         with:
           role-to-assume: ${{ vars.AWS_TERRAFORM_PLAN_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
-          role-session-name: GitHubActions-Terraform-Plan
+          role-session-name: TerraformFeaturePlan
 
       - name: Verify AWS Identity
         run: aws sts get-caller-identity
 
       - name: Terraform Initialize
         working-directory: ${{ env.TF_WORKING_DIR }}
-        run: terraform init -input=false
+        run: terraform init -input=false -lockfile=readonly
 
       - name: Terraform Plan
         working-directory: ${{ env.TF_WORKING_DIR }}
-        run: terraform plan -input=false -lock-timeout=5m -out=tfplan
+        run: |
+          terraform plan -input=false -no-color -lock-timeout=5m -out=tfplan.binary
+          terraform show -json tfplan.binary > tfplan.json
 
-      - name: Upload Terraform Plan
+      - name: Upload PR Plan
         uses: actions/upload-artifact@v4
         with:
-          name: terraform-plan-${{ github.run_id }}
-          path: terraform/tfplan
-          retention-days: 1
+          name: feature-plan-${{ github.run_id }}
+          path: |
+            ${{ env.TF_WORKING_DIR }}/tfplan.binary
+            ${{ env.TF_WORKING_DIR }}/tfplan.json
+          retention-days: 3
+
 
   # ==========================================
-  # STAGE 3: PRODUCTION APPROVAL + APPLY
+  # STAGE 3: CHECKOV SECURITY SCAN
   # ==========================================
+
+  security:
+    if: >-
+      (github.event_name == 'push' &&
+       github.ref != 'refs/heads/main') ||
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository)    
+    name: Feature Security Scan
+    needs: feature_plan
+
+    uses: ./.github/workflows/security-scan.yml
+
+    with:
+      plan_artifact_name: feature-plan-${{ github.run_id }}
+      tf_working_dir: terraform
+
+
+  # ==========================================
+  # STAGE 4: TERRAFORM SECURITY SCAN AND APPLY
+  # Only after successful merge into main
+  # ==========================================
+
+
+  production_security:
+    name: Production Security Scan
+    needs: production_plan
+
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    uses: ./.github/workflows/security-scan.yml
+
+    with:
+      plan_artifact_name: production-plan-${{ github.run_id }}
+      tf_working_dir: terraform
+
 
   apply:
     name: Terraform Apply
     runs-on: ubuntu-latest
-    needs: plan
+
+    needs:
+      - production_plan
+      - production_security
+
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     environment:
       name: production
@@ -157,7 +207,7 @@ jobs:
       - name: Download Terraform Plan
         uses: actions/download-artifact@v4
         with:
-          name: terraform-plan-${{ github.run_id }}
+          name: feature-plan-${{ github.run_id }}
           path: terraform/
 
       - name: Configure AWS Credentials
@@ -165,15 +215,19 @@ jobs:
         with:
           role-to-assume: ${{ vars.AWS_TERRAFORM_APPLY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
-          role-session-name: GitHubActions-Terraform-Apply
+          role-session-name: TerraformProductionApply
 
       - name: Verify AWS Identity
         run: aws sts get-caller-identity
 
       - name: Terraform Initialize
         working-directory: ${{ env.TF_WORKING_DIR }}
-        run: terraform init -input=false
+        run: terraform init -input=false -lockfile=readonly
 
       - name: Terraform Apply
         working-directory: ${{ env.TF_WORKING_DIR }}
-        run: terraform apply -input=false -lock-timeout=5m tfplan
+        run: |
+          terraform apply \
+            -input=false \
+            -lock-timeout=5m \
+            tfplan.binary
