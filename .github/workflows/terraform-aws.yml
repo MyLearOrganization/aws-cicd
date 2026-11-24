@@ -38,13 +38,12 @@ jobs:
   # ==========================================
 
   validate:
-    if: >-
-      (github.event_name == 'push' &&
-      github.ref != 'refs/heads/main') ||
-      github.event_name == 'pull_request'
-
     name: Terraform Validation
     runs-on: ubuntu-latest
+
+    if: >-
+      github.event_name == 'push' ||
+      github.event_name == 'pull_request'
 
     steps:
       - name: Checkout repository
@@ -85,31 +84,40 @@ jobs:
 
   feature_plan:
     name: Feature Terraform Plan
+
     if: >-
       (github.event_name == 'push' &&
       github.ref != 'refs/heads/main') ||
       (github.event_name == 'pull_request' &&
       github.event.pull_request.head.repo.full_name == github.repository)
+
     needs: validate
+
+    permissions:
+      contents: read
+      id-token: write
+
     uses: ./.github/workflows/terraform-plan.yml
+
     with:
       aws_role_arn: ${{ vars.AWS_TERRAFORM_PLAN_ROLE_ARN }}
       plan_artifact_name: feature-plan-${{ github.run_id }}
       role_session_name: TerraformFeaturePlan
       tf_working_dir: terraform
 
-
   # ==========================================
-  # STAGE 3: CHECKOV SECURITY SCAN
+  # STAGE 3: FEATURE BRANCH SECURITY SCAN
   # ==========================================
 
   security:
+    name: Feature Security Scan
+
     if: >-
       (github.event_name == 'push' &&
-       github.ref != 'refs/heads/main') ||
+      github.ref != 'refs/heads/main') ||
       (github.event_name == 'pull_request' &&
-       github.event.pull_request.head.repo.full_name == github.repository)    
-    name: Feature Security Scan
+      github.event.pull_request.head.repo.full_name == github.repository)
+
     needs: feature_plan
 
     uses: ./.github/workflows/security-scan.yml
@@ -118,27 +126,40 @@ jobs:
       plan_artifact_name: feature-plan-${{ github.run_id }}
       tf_working_dir: terraform
 
-
   # ==========================================
-  # STAGE 4: TERRAFORM SECURITY SCAN AND APPLY
-  # Only after successful merge into main
+  # STAGE 4: PRODUCTION TERRAFORM PLAN
+  # Runs only after changes are merged into main
   # ==========================================
 
   production_plan:
     name: Production Terraform Plan
+
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    needs: validate
+
+    permissions:
+      contents: read
+      id-token: write
+
     uses: ./.github/workflows/terraform-plan.yml
+
     with:
       aws_role_arn: ${{ vars.AWS_TERRAFORM_PLAN_ROLE_ARN }}
       plan_artifact_name: production-plan-${{ github.run_id }}
       role_session_name: TerraformProductionPlan
       tf_working_dir: terraform
 
+  # ==========================================
+  # STAGE 5: PRODUCTION SECURITY SCAN
+  # ==========================================
+
   production_security:
     name: Production Security Scan
-    needs: production_plan
 
-    if: github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    needs: production_plan
 
     uses: ./.github/workflows/security-scan.yml
 
@@ -146,6 +167,10 @@ jobs:
       plan_artifact_name: production-plan-${{ github.run_id }}
       tf_working_dir: terraform
 
+  # ==========================================
+  # STAGE 6: PRODUCTION APPLY
+  # Only after successful production security scan
+  # ==========================================
 
   apply:
     name: Terraform Apply
@@ -173,10 +198,10 @@ jobs:
         with:
           terraform_version: ${{ env.TF_VERSION }}
 
-      - name: Download Terraform Plan
+      - name: Download Production Terraform Plan
         uses: actions/download-artifact@v4
         with:
-          name: feature-plan-${{ github.run_id }}
+          name: production-plan-${{ github.run_id }}
           path: terraform/
 
       - name: Configure AWS Credentials
