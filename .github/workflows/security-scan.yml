@@ -137,6 +137,7 @@ jobs:
 
     if: >-
       needs.security_scan.outputs.checkov_outcome == 'failure' &&
+      needs.security_scan.outputs.checkov_exit_code == '1' &&
       needs.security_scan.outputs.security_findings == 'true' &&
       needs.security_scan.outputs.report_valid == 'true'
 
@@ -155,7 +156,7 @@ jobs:
           echo "### Checkov Findings" >> "$GITHUB_STEP_SUMMARY"
           echo '```json' >> "$GITHUB_STEP_SUMMARY"
           jq '.' checkov-report/results_json.json >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY'
 
       - name: Confirm Security Review
         run: echo "Security review completed and approved."
