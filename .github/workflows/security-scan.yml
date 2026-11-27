@@ -159,7 +159,7 @@ jobs:
           echo '```' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Confirm Security Review
-        run: echo "Security review completed and approved."
+        run: echo "GitHub Environment approval has been granted."
 
   # ==========================================
   # STAGE 3: SECURITY APPROVAL GATE
